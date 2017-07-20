@@ -31,52 +31,82 @@ func init() {
 func main() {
 	banner := []byte("\nUser Access Verification\r\nUsername:")
 	timeout := 5 * time.Second
+	sessionCounter := 1
 
 	ln, err := net.Listen("tcp", ":2324")
-	checkError(err)
+	exitOnError(err)
 
-	log.Info("Server started on port 2324")
+	log.Info("Server started on %s", ln.Addr().String())
 
 	for {
 		conn, err := ln.Accept()
-		checkError(err)
-		go handleConnection(conn, banner, timeout)
+		exitOnError(err)
+		// Accept the connection and launch a routine for handling
+		go handleConnection(conn, banner, timeout, sessionCounter)
 	}
 }
 
-func handleConnection(conn net.Conn, banner []byte, timeout time.Duration) {
+func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessionCounter int) {
 	defer conn.Close()
 
+	// Log all connection related events with remote logging
 	connectionLog := log.WithFields(log.Fields{
-		"remote_ip": conn.RemoteAddr().String(),
+		"remote_addr":   conn.RemoteAddr().String(),
+		"type":          "connection",
+		"session_count": sessionCounter,
 	})
 
 	connectionLog.Info("Accepted connection")
 
 	err := negotiateTelnet(conn)
 	// If telnet negotiation fails, close the socket
+	// TODO: Accept a raw connection, as several clients aren't actually telnet
 	if err != nil {
+		connectionLog.Error("Telnet commands failed")
 		return
 	}
 
 	conn.Write(banner)
 
-	var buf [64]byte
+	var buf [1]byte
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(timeout))
 		// read upto 512 bytes
 		n, err := conn.Read(buf[0:])
-		checkError(err)
+		if err != nil {
+			// Read error, most likely time-out
+			connectionLog.Warn("Read error, closing socket")
+			return
+		}
+
+		connectionLog.WithFields(log.Fields{
+			"type":       "input",
+			"input_byte": buf[0],
+		}).Info("Input received")
 
 		fmt.Println("read:", buf[0:n])
 
-		// write the n bytes read
-		_, err2 := conn.Write(buf[0:n])
-		if err2 != nil {
-			return
+		switch buf[0] {
+		case 127: // DEL
+			fallthrough
+		case 8: // Backspace
+			conn.Write([]byte("\b \b"))
+		case 0: // null
+			fallthrough
+		case 10: // New Line
+			// handleNewline(out);
+		case 13:
+		default:
+			_, err2 := conn.Write(buf[0:n])
+			if err2 != nil {
+				return
+			}
 		}
 	}
+}
+
+func handleNewline(conn net.Conn) {
 
 }
 
@@ -91,9 +121,10 @@ func negotiateTelnet(conn net.Conn) (err error) {
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		// Read 3 bytes per read for commands
 		var buffer [3]byte
 		_, err := conn.Read(buffer[0:])
-		fmt.Println("read:", buffer)
+		// fmt.Println("read:", buffer)
 
 		if err != nil {
 			return err
@@ -110,13 +141,13 @@ func negotiateTelnet(conn net.Conn) (err error) {
 			}
 		}
 		if commandEcho && commandLinemode {
-			fmt.Println("Got both commands")
 			break
 		}
 	}
+	return nil
 }
 
-func checkError(err error) {
+func exitOnError(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
 		os.Exit(1)
