@@ -1,10 +1,13 @@
 package main
 
 import (
-	"fmt"
 	"net"
 	"os"
 	"time"
+
+	"bytes"
+
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -30,17 +33,22 @@ func init() {
 
 func main() {
 	banner := []byte("\nUser Access Verification\r\nUsername:")
-	timeout := 5 * time.Second
+	timeout := 30 * time.Second
 	sessionCounter := 1
 
 	ln, err := net.Listen("tcp", ":2324")
-	exitOnError(err)
+	if err != nil {
+		log.WithError(err).Fatal("Starting listener failed")
+		os.Exit(1)
+	}
 
-	log.Info("Server started on %s", ln.Addr().String())
+	log.Info("Server started on ", ln.Addr().String())
 
 	for {
 		conn, err := ln.Accept()
-		exitOnError(err)
+		if err != nil {
+			log.WithError(err).Warn("Can't accept socket")
+		}
 		// Accept the connection and launch a routine for handling
 		go handleConnection(conn, banner, timeout, sessionCounter)
 	}
@@ -49,67 +57,115 @@ func main() {
 func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessionCounter int) {
 	defer conn.Close()
 
+	// Save the current state, username and password
+	state := [3]string{"username", "", ""}
+
 	// Log all connection related events with remote logging
 	connectionLog := log.WithFields(log.Fields{
 		"remote_addr":   conn.RemoteAddr().String(),
 		"type":          "connection",
 		"session_count": sessionCounter,
 	})
-
 	connectionLog.Info("Accepted connection")
 
+	// Set linemode and echo mode
 	err := negotiateTelnet(conn)
 	// If telnet negotiation fails, close the socket
-	// TODO: Accept a raw connection, as several clients aren't actually telnet
 	if err != nil {
-		connectionLog.Error("Telnet commands failed")
+		connectionLog.WithError(err).Error("Telnet commands failed")
 		return
 	}
 
+	// Send the banner to the remote host
 	conn.Write(banner)
 
+	// Read one byte at a time
 	var buf [1]byte
+	var input bytes.Buffer
+	lastInput := time.Now()
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(timeout))
-		// read upto 512 bytes
+
 		n, err := conn.Read(buf[0:])
 		if err != nil {
 			// Read error, most likely time-out
-			connectionLog.Warn("Read error, closing socket")
+			connectionLog.WithError(err).Warn("Read error")
 			return
 		}
 
 		connectionLog.WithFields(log.Fields{
 			"type":       "input",
 			"input_byte": buf[0],
+			"input_char": string(buf[0]),
+			"last_input": time.Now().Sub(lastInput).Nanoseconds(),
 		}).Info("Input received")
-
-		fmt.Println("read:", buf[0:n])
 
 		switch buf[0] {
 		case 127: // DEL
 			fallthrough
 		case 8: // Backspace
-			conn.Write([]byte("\b \b"))
+			if input.Len() > 0 {
+				// Remove the previous character from the buffer
+				input.Truncate(input.Len() - 1)
+				if state[0] == "username" {
+					// Remove the character at the remote host
+					conn.Write([]byte("\b \b"))
+				}
+			}
 		case 0: // null
 			fallthrough
 		case 10: // New Line
-			// handleNewline(out);
+			state = handleNewline(conn, state, &input, connectionLog)
 		case 13:
 		default:
-			_, err2 := conn.Write(buf[0:n])
-			if err2 != nil {
-				return
+			if state[0] == "username" {
+				// Echo the character when in username mode
+				_, err := conn.Write(buf[0:n])
+				if err != nil {
+					connectionLog.WithError(err).Error("Can't write to connection")
+				}
 			}
+			// Store the input
+			input.WriteByte(buf[0])
 		}
+		lastInput = time.Now()
 	}
 }
 
-func handleNewline(conn net.Conn) {
+func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, connectionLog *log.Entry) [3]string {
+	if state[0] == "username" {
+		// Read all characters in the buffer
+		state[1] = input.String()
+		connectionLog.WithField("username", state[1]).Info("Username entered")
 
+		// Clear the buffer
+		input.Reset()
+
+		// Switch to password entry
+		state[0] = "password"
+		conn.Write([]byte("\r\nPassword: "))
+	} else {
+		// Store all characters in the buffer
+		state[2] = input.String()
+
+		connectionLog.WithFields(log.Fields{
+			"password": state[2],
+			"entry":    strings.Join(state[1:], ":"),
+		}).Info("Password entered")
+
+		// Reset the buffers and state
+		input.Reset()
+		state[0] = "username"
+		state[1] = ""
+		state[2] = ""
+
+		conn.Write([]byte("\r\nWrong password!\r\n\r\nUsername: "))
+	}
+	return state
 }
 
+// Poor implemenation of DO LINEMODE and WILL ECHO. If it's a normal telnet client, this works just fine
 func negotiateTelnet(conn net.Conn) (err error) {
 	// Negotiate Telnet parameters
 	telnetCommands := []byte{255, 253, 34, 255, 251, 1}
@@ -124,17 +180,20 @@ func negotiateTelnet(conn net.Conn) (err error) {
 		// Read 3 bytes per read for commands
 		var buffer [3]byte
 		_, err := conn.Read(buffer[0:])
-		// fmt.Println("read:", buffer)
 
 		if err != nil {
 			return err
 		}
 
+		// IAC
 		if buffer[0] == 255 {
+			// DO, WILL, WONT, DONT
 			if buffer[1] == 253 || buffer[1] == 251 || buffer[1] == 252 || buffer[1] == 254 {
+				// ECHO
 				if buffer[2] == 1 {
 					commandEcho = true
 				}
+				// LINEMODE
 				if buffer[2] == 34 {
 					commandLinemode = true
 				}
@@ -145,11 +204,4 @@ func negotiateTelnet(conn net.Conn) (err error) {
 		}
 	}
 	return nil
-}
-
-func exitOnError(err error) {
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
-		os.Exit(1)
-	}
 }
