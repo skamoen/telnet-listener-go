@@ -14,20 +14,21 @@ import (
 
 func init() {
 	log.SetFormatter(&log.JSONFormatter{
+		TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
 		FieldMap: log.FieldMap{
 			log.FieldKeyTime: "@timestamp",
 			// 		 FieldKeyLevel: "@level",
 			// 		 FieldKeyMsg: "@message",
 		},
 	})
-	log.SetOutput(os.Stdout)
+	// log.SetOutput(os.Stdout)
 	//   You could set this to any `io.Writer` such as a file
-	// file, err := os.OpenFile("telnet-listener.log", os.O_CREATE|os.O_WRONLY, 0666)
-	// if err == nil {
-	// 	log.SetOutput(file)
-	// } else {
-	// 	log.Info("Failed to log to file, using default stderr")
-	// }
+	file, err := os.OpenFile("telnet-listener.log", os.O_CREATE|os.O_WRONLY, 0666)
+	if err == nil {
+		log.SetOutput(file)
+	} else {
+		log.Info("Failed to log to file, using default stderr")
+	}
 	log.SetLevel(log.DebugLevel)
 }
 
@@ -36,7 +37,7 @@ func main() {
 	timeout := 30 * time.Second
 	sessionCounter := 1
 
-	ln, err := net.Listen("tcp", ":2324")
+	ln, err := net.Listen("tcp", ":2323")
 	if err != nil {
 		log.WithError(err).Fatal("Starting listener failed")
 		os.Exit(1)
@@ -51,6 +52,7 @@ func main() {
 		}
 		// Accept the connection and launch a routine for handling
 		go handleConnection(conn, banner, timeout, sessionCounter)
+		sessionCounter++
 	}
 }
 
@@ -62,11 +64,16 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessi
 
 	// Log all connection related events with remote logging
 	connectionLog := log.WithFields(log.Fields{
-		"remote_addr":   conn.RemoteAddr().String(),
-		"type":          "connection",
-		"session_count": sessionCounter,
+		"remote_ip": conn.RemoteAddr().(*net.TCPAddr).IP,
+		"port":      conn.RemoteAddr().(*net.TCPAddr).Port,
+		"type":      "connection",
+		"session":   sessionCounter,
 	})
+
 	connectionLog.Info("Accepted connection")
+
+	sessionLifeTime := time.Now()
+	defer logSessionTime(sessionLifeTime, connectionLog)
 
 	// Set linemode and echo mode
 	err := negotiateTelnet(conn)
@@ -98,7 +105,7 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessi
 			"type":       "input",
 			"input_byte": buf[0],
 			"input_char": string(buf[0]),
-			"last_input": time.Now().Sub(lastInput).Nanoseconds(),
+			"last_input": time.Since(lastInput).Nanoseconds() / 1000000,
 		}).Info("Input received")
 
 		switch buf[0] {
@@ -165,7 +172,7 @@ func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, connecti
 	return state
 }
 
-// Poor implemenation of DO LINEMODE and WILL ECHO. If it's a normal telnet client, this works just fine
+// Poor implemention of DO LINEMODE and WILL ECHO. If it's a normal telnet client, this works just fine
 func negotiateTelnet(conn net.Conn) (err error) {
 	// Negotiate Telnet parameters
 	telnetCommands := []byte{255, 253, 34, 255, 251, 1}
@@ -204,4 +211,8 @@ func negotiateTelnet(conn net.Conn) (err error) {
 		}
 	}
 	return nil
+}
+
+func logSessionTime(start time.Time, log *log.Entry) {
+	log.WithField("session_time", time.Since(start)/1000000).Info("Connection closed")
 }
