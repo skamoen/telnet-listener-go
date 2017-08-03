@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"strconv"
 )
 
 func init() {
@@ -36,20 +37,31 @@ func main() {
 	banner := []byte("\nUser Access Verification\r\nUsername:")
 	timeout := 30 * time.Second
 	sessionCounter := 1
+	connChannel := make(chan net.Conn, 100)
 
-	ln, err := net.Listen("tcp", ":2323")
-	if err != nil {
-		log.WithError(err).Fatal("Starting listener failed")
-		os.Exit(1)
+	// Open 500 sockets on ports 23000 to 23499
+	for i := 23000; i < 23500; i++ {
+		go func(connChannel *chan net.Conn, i int) {
+			ln, err := net.Listen("tcp", ":"+strconv.Itoa(i))
+			if err != nil {
+				log.WithError(err).Fatal("Starting listener failed")
+				os.Exit(1)
+			}
+
+			log.Info("Server started on ", ln.Addr().String())
+
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					log.WithError(err).Warn("Can't accept socket")
+				}
+				*connChannel <- conn
+			}
+		}(&connChannel, i)
 	}
 
-	log.Info("Server started on ", ln.Addr().String())
-
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.WithError(err).Warn("Can't accept socket")
-		}
+		conn := <-connChannel
 		// Accept the connection and launch a routine for handling
 		go handleConnection(conn, banner, timeout, sessionCounter)
 		sessionCounter++
@@ -64,10 +76,11 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessi
 
 	// Log all connection related events with remote logging
 	connectionLog := log.WithFields(log.Fields{
-		"remote_ip": conn.RemoteAddr().(*net.TCPAddr).IP,
-		"port":      conn.RemoteAddr().(*net.TCPAddr).Port,
-		"type":      "connection",
-		"session":   sessionCounter,
+		"remote_ip":   conn.RemoteAddr().(*net.TCPAddr).IP,
+		"remote_port": conn.RemoteAddr().(*net.TCPAddr).Port,
+		"local_port":  conn.LocalAddr().(*net.TCPAddr).Port,
+		"type":        "connection",
+		"session":     sessionCounter,
 	})
 
 	connectionLog.Info("Accepted connection")
