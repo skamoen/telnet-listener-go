@@ -9,27 +9,41 @@ import (
 
 	"strings"
 
+	"flag"
 	log "github.com/sirupsen/logrus"
 	"strconv"
 )
 
+var portStart int
+var numberOfPorts int
+
 func init() {
-	log.SetFormatter(&log.JSONFormatter{
-		TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
-		FieldMap: log.FieldMap{
-			log.FieldKeyTime: "@timestamp",
-			// 		 FieldKeyLevel: "@level",
-			// 		 FieldKeyMsg: "@message",
-		},
-	})
-	// log.SetOutput(os.Stdout)
-	//   You could set this to any `io.Writer` such as a file
-	file, err := os.OpenFile("telnet-listener.log", os.O_CREATE|os.O_WRONLY, 0666)
-	if err == nil {
-		log.SetOutput(file)
+	devPtr := flag.Bool("dev", false, "Enable stdOut development logging")
+	flag.IntVar(&portStart, "p", 23000, "Port to listen on")
+	flag.IntVar(&numberOfPorts, "n", 1, "Number of ports to listen on")
+
+	flag.Parse()
+
+	if *devPtr {
+		log.SetOutput(os.Stdout)
 	} else {
-		log.Info("Failed to log to file, using default stderr")
+		log.SetFormatter(&log.JSONFormatter{
+			TimestampFormat: "2006-01-02T15:04:05.999Z07:00",
+			FieldMap: log.FieldMap{
+				log.FieldKeyTime: "@timestamp",
+				// 		 FieldKeyLevel: "@level",
+				// 		 FieldKeyMsg: "@message",
+			},
+		})
+		//   You could set this to any `io.Writer` such as a file
+		file, err := os.OpenFile("telnet-listener.log", os.O_CREATE|os.O_WRONLY, 0666)
+		if err == nil {
+			log.SetOutput(file)
+		} else {
+			log.Info("Failed to log to file, using default stderr")
+		}
 	}
+
 	log.SetLevel(log.DebugLevel)
 }
 
@@ -40,7 +54,7 @@ func main() {
 	connChannel := make(chan net.Conn, 100)
 
 	// Open 500 sockets on ports 23000 to 23499
-	for i := 23000; i < 23500; i++ {
+	for i := portStart; i < portStart+numberOfPorts; i++ {
 		go func(connChannel *chan net.Conn, i int) {
 			ln, err := net.Listen("tcp", ":"+strconv.Itoa(i))
 			if err != nil {
