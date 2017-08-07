@@ -10,17 +10,22 @@ import (
 	"strings"
 
 	"flag"
-	log "github.com/sirupsen/logrus"
 	"strconv"
+
+	log "github.com/sirupsen/logrus"
 )
 
-var portStart int
-var numberOfPorts int
+var (
+	numberOfPorts  int
+	portStart      int
+	timeoutSetting time.Duration
+)
 
 func init() {
 	devPtr := flag.Bool("dev", false, "Enable stdOut development logging")
 	flag.IntVar(&portStart, "p", 23000, "Port to listen on")
 	flag.IntVar(&numberOfPorts, "n", 1, "Number of ports to listen on")
+	flag.DurationVar(&timeoutSetting, "t", 30, "Time to wait for idle connections")
 
 	flag.Parse()
 
@@ -49,13 +54,13 @@ func init() {
 
 func main() {
 	banner := []byte("\nUser Access Verification\r\nUsername:")
-	timeout := 30 * time.Second
-	sessionCounter := 1
-	connChannel := make(chan net.Conn, 100)
+	timeout := timeoutSetting * time.Second
+	sCount := 1
+	cchan := make(chan net.Conn, 100)
 
 	// Open 500 sockets on ports 23000 to 23499
 	for i := portStart; i < portStart+numberOfPorts; i++ {
-		go func(connChannel *chan net.Conn, i int) {
+		go func(cchan chan net.Conn, i int) {
 			ln, err := net.Listen("tcp", ":"+strconv.Itoa(i))
 			if err != nil {
 				log.WithError(err).Fatal("Starting listener failed")
@@ -69,44 +74,44 @@ func main() {
 				if err != nil {
 					log.WithError(err).Warn("Can't accept socket")
 				}
-				*connChannel <- conn
+				cchan <- conn
 			}
-		}(&connChannel, i)
+		}(cchan, i)
 	}
 
 	for {
-		conn := <-connChannel
+		conn := <-cchan
 		// Accept the connection and launch a routine for handling
-		go handleConnection(conn, banner, timeout, sessionCounter)
-		sessionCounter++
+		go handleConnection(conn, banner, timeout, sCount)
+		sCount++
 	}
 }
 
-func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessionCounter int) {
+func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCount int) {
 	defer conn.Close()
 
 	// Save the current state, username and password
 	state := [3]string{"username", "", ""}
 
 	// Log all connection related events with remote logging
-	connectionLog := log.WithFields(log.Fields{
+	conlog := log.WithFields(log.Fields{
 		"remote_ip":   conn.RemoteAddr().(*net.TCPAddr).IP,
 		"remote_port": conn.RemoteAddr().(*net.TCPAddr).Port,
 		"local_port":  conn.LocalAddr().(*net.TCPAddr).Port,
 		"type":        "connection",
-		"session":     sessionCounter,
+		"session":     sCount,
 	})
 
-	connectionLog.Info("Accepted connection")
+	conlog.Info("Accepted connection")
 
-	sessionLifeTime := time.Now()
-	defer logSessionTime(sessionLifeTime, connectionLog)
+	t := time.Now()
+	defer logSessionTime(t, conlog)
 
 	// Set linemode and echo mode
 	err := negotiateTelnet(conn)
 	// If telnet negotiation fails, close the socket
 	if err != nil {
-		connectionLog.WithError(err).Error("Telnet commands failed")
+		conlog.WithError(err).Error("Telnet commands failed")
 		return
 	}
 
@@ -124,11 +129,11 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessi
 		n, err := conn.Read(buf[0:])
 		if err != nil {
 			// Read error, most likely time-out
-			connectionLog.WithError(err).Warn("Read error")
+			conlog.WithError(err).Warn("Read error")
 			return
 		}
 
-		connectionLog.WithFields(log.Fields{
+		conlog.WithFields(log.Fields{
 			"type":       "input",
 			"input_byte": buf[0],
 			"input_char": string(buf[0]),
@@ -150,14 +155,14 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessi
 		case 0: // null
 			fallthrough
 		case 10: // New Line
-			state = handleNewline(conn, state, &input, connectionLog)
+			state = handleNewline(conn, state, &input, conlog)
 		case 13:
 		default:
 			if state[0] == "username" {
 				// Echo the character when in username mode
 				_, err := conn.Write(buf[0:n])
 				if err != nil {
-					connectionLog.WithError(err).Error("Can't write to connection")
+					conlog.WithError(err).Error("Can't write to connection")
 				}
 			}
 			// Store the input
@@ -167,11 +172,11 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sessi
 	}
 }
 
-func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, connectionLog *log.Entry) [3]string {
+func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, conlog *log.Entry) [3]string {
 	if state[0] == "username" {
 		// Read all characters in the buffer
 		state[1] = input.String()
-		connectionLog.WithField("username", state[1]).Info("Username entered")
+		conlog.WithField("username", state[1]).Info("Username entered")
 
 		// Clear the buffer
 		input.Reset()
@@ -183,7 +188,7 @@ func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, connecti
 		// Store all characters in the buffer
 		state[2] = input.String()
 
-		connectionLog.WithFields(log.Fields{
+		conlog.WithFields(log.Fields{
 			"password": state[2],
 			"entry":    strings.Join(state[1:], ":"),
 		}).Info("Password entered")
@@ -201,13 +206,13 @@ func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, connecti
 
 // Poor implemention of DO LINEMODE and WILL ECHO. If it's a normal telnet client, this works just fine
 func negotiateTelnet(conn net.Conn) (err error) {
-	// Negotiate Telnet parameters
-	telnetCommands := []byte{255, 253, 34, 255, 251, 1}
-	// Handle connection
-	conn.Write(telnetCommands)
+	// Write IAC DO LINE MODE IAC WILL ECH
+	conn.Write([]byte{255, 253, 34, 255, 251, 1})
 
-	commandEcho := false
-	commandLinemode := false
+	// Expect IAC DO ECHO
+	ce := false
+	// Expect IAC WILL LINEMODE
+	cl := false
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -225,15 +230,15 @@ func negotiateTelnet(conn net.Conn) (err error) {
 			if buffer[1] == 253 || buffer[1] == 251 || buffer[1] == 252 || buffer[1] == 254 {
 				// ECHO
 				if buffer[2] == 1 {
-					commandEcho = true
+					ce = true
 				}
 				// LINEMODE
 				if buffer[2] == 34 {
-					commandLinemode = true
+					cl = true
 				}
 			}
 		}
-		if commandEcho && commandLinemode {
+		if ce && cl {
 			break
 		}
 	}
