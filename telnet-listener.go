@@ -142,11 +142,12 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 	defer logSessionTime(t, conlog)
 
 	// Set linemode and echo mode
-	err := negotiateTelnet(conn)
+	negotiateBytes, err := negotiateTelnet(conn)
 	// If telnet negotiation fails, close the socket
 	if err != nil {
+		metrics.raw = true
+		metrics.input = append(metrics.input, negotiateBytes...)
 		conlog.WithError(err).Error("Telnet commands failed")
-		return
 	}
 
 	// Send the banner to the remote host
@@ -184,7 +185,7 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 			if input.Len() > 0 {
 				// Remove the previous character from the buffer
 				input.Truncate(input.Len() - 1)
-				if state[0] == "username" {
+				if state[0] == "username" && !metrics.raw {
 					// Remove the character at the remote host
 					conn.Write([]byte("\b \b"))
 				}
@@ -195,7 +196,7 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 			state = handleNewline(conn, state, &input, metrics, conlog)
 		case 13:
 		default:
-			if state[0] == "username" {
+			if state[0] == "username" && !metrics.raw {
 				// Echo the character when in username mode
 				_, err := conn.Write(buf[0:n])
 				if err != nil {
@@ -245,7 +246,8 @@ func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, metrics 
 }
 
 // Poor implemention of DO LINEMODE and WILL ECHO. If it's a normal telnet client, this works just fine
-func negotiateTelnet(conn net.Conn) (err error) {
+func negotiateTelnet(conn net.Conn) (bytes []int, err error) {
+	var negotiateBytes []int
 	// Write IAC DO LINE MODE IAC WILL ECH
 	conn.Write([]byte{255, 253, 34, 255, 251, 1})
 
@@ -261,8 +263,10 @@ func negotiateTelnet(conn net.Conn) (err error) {
 		_, err := conn.Read(buffer[0:])
 
 		if err != nil {
-			return err
+			return negotiateBytes, err
 		}
+
+		negotiateBytes = append(negotiateBytes, int(buffer[0]), int(buffer[1]), int(buffer[2]))
 
 		// IAC
 		if buffer[0] == 255 {
@@ -282,12 +286,13 @@ func negotiateTelnet(conn net.Conn) (err error) {
 			break
 		}
 	}
-	return nil
+	return negotiateBytes, nil
 }
 
 func (m *metrics) log() {
 
 	sessionLog.WithFields(log.Fields{
+		"raw":              m.raw,
 		"session_id":       m.sessionID,
 		"session_start":    m.sessionStart,
 		"session_duration": time.Since(m.sessionStart) / 1000000,
@@ -304,6 +309,7 @@ func (m *metrics) log() {
 }
 
 type metrics struct {
+	raw             bool
 	sessionStart    time.Time
 	sessionID       int
 	sessionDuration int
