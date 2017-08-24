@@ -167,14 +167,14 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 			return
 		}
 
-		// conlog.WithFields(log.Fields{
-		// 	"type":       "input",
-		// 	"input_byte": buf[0],
-		// 	"input_char": string(buf[0]),
-		// 	"last_input": time.Since(lastInput).Nanoseconds() / 1000000,
-		// }).Info("Input received")
+		conlog.WithFields(log.Fields{
+			"type":       "input",
+			"input_byte": buf[0],
+			"input_char": string(buf[0]),
+			"last_input": time.Since(lastInput).Nanoseconds() / 1000000,
+		}).Info("Input received")
 
-		metrics.input = append(metrics.input, buf[0])
+		metrics.input = append(metrics.input, int(buf[0]))
 		metrics.inputTimes = append(metrics.inputTimes, time.Since(lastInput).Nanoseconds()/1000000)
 
 		switch buf[0] {
@@ -192,7 +192,7 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 		case 0: // null
 			fallthrough
 		case 10: // New Line
-			state = handleNewline(conn, state, &input, metrics)
+			state = handleNewline(conn, state, &input, metrics, conlog)
 		case 13:
 		default:
 			if state[0] == "username" {
@@ -209,12 +209,12 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 	}
 }
 
-func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, metrics *metrics) [3]string {
+func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, metrics *metrics, conlog *log.Entry) [3]string {
 	if state[0] == "username" {
 		// Read all characters in the buffer
 		state[1] = input.String()
 		metrics.usernames = append(metrics.usernames, state[1])
-		// conlog.WithField("username", state[1]).Info("Username entered")
+		conlog.WithField("username", state[1]).Info("Username entered")
 
 		// Clear the buffer
 		input.Reset()
@@ -228,10 +228,10 @@ func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, metrics 
 
 		metrics.passwords = append(metrics.passwords, state[2])
 		metrics.entries = append(metrics.entries, strings.Join(state[1:], ":"))
-		// conlog.WithFields(log.Fields{
-		// 	"password": state[2],
-		// 	"entry":    strings.Join(state[1:], ":"),
-		// }).Info("Password entered")
+		conlog.WithFields(log.Fields{
+			"password": state[2],
+			"entry":    strings.Join(state[1:], ":"),
+		}).Info("Password entered")
 
 		// Reset the buffers and state
 		input.Reset()
@@ -310,7 +310,7 @@ type metrics struct {
 	remoteIP        net.IP
 	localPort       int
 	remotePort      int
-	input           []byte
+	input           []int
 	inputTimes      []int64
 	usernames       []string
 	passwords       []string
