@@ -259,14 +259,13 @@ func negotiateTelnet(conn net.Conn) (bytes []int, err error) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		// Read 3 bytes per read for commands
-		var buffer [3]byte
+		var buffer [1]byte
 		_, err := conn.Read(buffer[0:])
-
 		if err != nil {
 			return negotiateBytes, err
 		}
 
-		negotiateBytes = append(negotiateBytes, int(buffer[0]), int(buffer[1]), int(buffer[2]))
+		negotiateBytes = append(negotiateBytes, int(buffer[0]))
 
 		// IAC
 		if buffer[0] == 255 {
