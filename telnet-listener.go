@@ -142,11 +142,11 @@ func handleConnection(conn net.Conn, banner []byte, timeout time.Duration, sCoun
 	defer logSessionTime(t, conlog)
 
 	// Set linemode and echo mode
-	negotiateBytes, err := negotiateTelnet(conn)
+	negotiation, err := negotiateTelnet(conn)
 	// If telnet negotiation fails, close the socket
 	if err != nil {
 		metrics.raw = true
-		metrics.input = append(metrics.input, negotiateBytes...)
+		metrics.input = append(metrics.input, negotiation.bytes...)
 		conlog.WithError(err).Error("Telnet commands failed")
 	}
 
@@ -246,46 +246,77 @@ func handleNewline(conn net.Conn, state [3]string, input *bytes.Buffer, metrics 
 }
 
 // Poor implemention of DO LINEMODE and WILL ECHO. If it's a normal telnet client, this works just fine
-func negotiateTelnet(conn net.Conn) (bytes []int, err error) {
-	var negotiateBytes []int
+func negotiateTelnet(conn net.Conn) (*negotiation, error) {
+	negotiation := new(negotiation)
 	// Write IAC DO LINE MODE IAC WILL ECH
 	conn.Write([]byte{255, 253, 34, 255, 251, 1})
 
-	// Expect IAC DO ECHO
-	ce := false
 	// Expect IAC WILL LINEMODE
-	cl := false
+	// Expect IAC DO ECHO
 
-	for {
-		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		// Read 3 bytes per read for commands
-		var buffer [1]byte
-		_, err := conn.Read(buffer[0:])
-		if err != nil {
-			return negotiateBytes, err
-		}
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// Read 3 bytes per read for commands
+	var buffer [1]byte
+	_, err := conn.Read(buffer[0:])
+	if err != nil {
+		return negotiation, err
+	}
 
-		negotiateBytes = append(negotiateBytes, int(buffer[0]))
+	negotiation.bytes = append(negotiation.bytes, int(buffer[0]))
 
-		// IAC
-		if buffer[0] == 255 {
+	// IAC, start of command
+	if buffer[0] == 255 {
+		var option int
+
+		for {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+			// Read next byte, expect option
+			_, err := conn.Read(buffer[0:])
+			if err != nil {
+				return negotiation, err
+			}
+			negotiation.bytes = append(negotiation.bytes, int(buffer[0]))
+
+			// If null byte, try again
+			if buffer[0] == 0 {
+				continue
+			}
+
+			if buffer[0] == 255 {
+				// New Command, reset and read new byte
+				option = 0
+				continue
+			}
 			// DO, WILL, WONT, DONT
-			if buffer[1] == 253 || buffer[1] == 251 || buffer[1] == 252 || buffer[1] == 254 {
-				// ECHO
-				if buffer[2] == 1 {
-					ce = true
+			if buffer[0] == 253 || buffer[0] == 251 || buffer[0] == 252 || buffer[0] == 254 {
+				// Option is a valid Telnet option
+				option = int(buffer[0])
+				continue
+			}
+
+			// ECHO
+			if buffer[0] == 1 {
+				negotiation.commandEcho = true
+				if option != 253 {
+					negotiation.valueEcho = false
 				}
-				// LINEMODE
-				if buffer[2] == 34 {
-					cl = true
+				continue
+			}
+			// LINEMODE
+			if buffer[0] == 34 {
+				negotiation.commandLinemode = true
+				if option != 251 {
+					negotiation.valueLinemode = false
 				}
+				continue
+			}
+
+			if negotiation.commandEcho && negotiation.commandLinemode {
+				break
 			}
 		}
-		if ce && cl {
-			break
-		}
 	}
-	return negotiateBytes, nil
+	return negotiation, nil
 }
 
 func (m *metrics) log() {
@@ -305,6 +336,12 @@ func (m *metrics) log() {
 		"entries":          m.entries,
 	}).Info("Session ended")
 
+}
+
+type negotiation struct {
+	bytes                        []int
+	commandEcho, commandLinemode bool
+	valueEcho, valueLinemode     bool
 }
 
 type metrics struct {
